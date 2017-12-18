@@ -305,15 +305,16 @@ void maintain_features(DP& read, DP& ref) {
 
     // ========== Debug ==========
 
-    stringstream ss, ss2;
-    ss << "read: all=" << read.getNbPoints() <<
+    stringstream ss;
+    ss << endl <<
+          "read: all=" << read.getNbPoints() <<
           ", in=" << readInliersCount <<
-          ", out=" << readOutliersCount;
-    ss2 << "ref:  all=" << ref.getNbPoints() <<
-           ", in=" << refInliersCount <<
-           ", out=" << refOutliersCount;
+          ", out=" << readOutliersCount << endl <<
+          "ref:  all=" << ref.getNbPoints() <<
+          ", in=" << refInliersCount <<
+          ", out=" << refOutliersCount << endl <<
+          "map:  all=" << mapPoints.getNbPoints();
     ROS_INFO("%s", ss.str().c_str());
-    ROS_INFO("%s", ss2.str().c_str());
 
     if (saveToVTK) {
         read.save("read_orig.vtk");
