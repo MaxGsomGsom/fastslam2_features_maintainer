@@ -39,4 +39,6 @@ CMakeLists.txt.user*
 
 *~
 *.pyc
-
+/build/
+/devel/
+/install/

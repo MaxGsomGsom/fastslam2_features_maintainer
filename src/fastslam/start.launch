@@ -1,7 +1,0 @@
-<launch>
-	<node pkg="stage_ros" type="stageros" name="stageros" args="$(find fastslam)/world/msu_lab4_1.world" respawn="false" />
-	<node name="teleop" pkg="turtlesim" type="turtle_teleop_key" >
-		<remap from="turtle1/cmd_vel" to="cmd_vel"/>
-	</node>
-	<!--<node name="particle_mapper" pkg="fastslam" type="particle_mapper.py" output="screen"/>-->
-</launch>

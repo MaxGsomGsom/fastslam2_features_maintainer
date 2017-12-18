@@ -54,7 +54,7 @@
   <build_depend>sensor_msgs</build_depend>
   <build_depend>pointmatcher_ros</build_depend>
   <build_depend>libpointmatcher</build_depend>
-  <build_depend>tf2_ros</build_depend>
+  <build_depend>tf</build_depend>
   <build_export_depend>roscpp</build_export_depend>
   <exec_depend>roscpp</exec_depend>
 
