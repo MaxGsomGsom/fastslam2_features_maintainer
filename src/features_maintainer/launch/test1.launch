@@ -68,6 +68,8 @@
 
     <!--<node name="features_maintainer" pkg="features_maintainer" type="features_maintainer_node"/>-->
 
+    <!--<node pkg="turtlebot3_teleop" type="turtlebot3_teleop_key" name="turtlebot3_teleop_keyboard"  output="log"/>-->
+
     <node name="rviz" pkg="rviz" type="rviz" args="-d $(find features_maintainer)/rviz/test1.rviz" />
 
 </launch>
