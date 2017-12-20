@@ -34,14 +34,16 @@ double inlierPointProbability = 0.99; //0.8
 double outlierPointProbability = 0.1; //0.1
 bool saveToVTK = false;
 int knnRead = 10; //kd-tree //10
-int knnRef = 1; //1
+int knnRef = 5; //1
 double maxScanDensity = 100000; //points per m3
+int minPointsToMatch = max(knnRef, knnRead);
 
 DP mapPoints;
 
 //Functions
 void scan_callback(const sensor_msgs::LaserScan& msg);
-void maintain_features(DP& read, DP& ref);
+pair<DP,DP> filter_transform_map_scan(DP& readPoints); //return: transformed scan and partial map
+DP match_clouds(DP& read, DP& ref); //return: scan outliers
 void update_map(DP& scanOutliers, DP& partialMap);
 
 double calc_point_weight(double probability, double prev=0) {
@@ -80,26 +82,6 @@ int main(int argc, char** argv)
 
 void scan_callback(const sensor_msgs::LaserScan& msg)
 {
-    //========== Get and check pose transformation params ==========
-
-    PM::TransformationParameters robotPoseTrans;
-    try {
-        //Get transformation of new points cloud to map
-        robotPoseTrans = PointMatcher_ros::transformListenerToEigenMatrix<float>(*tfListener, mapFrame, poseFrame, ros::Time(0));
-    }
-    catch (tf2::TransformException& ex)
-    {
-        ROS_WARN("%s", ex.what());
-        return;
-    }
-
-    PM::Transformation* rigidTrans = PM::get().REG(Transformation).create("RigidTransformation");
-
-    if (!rigidTrans->checkParameters(robotPoseTrans)) {
-        std::cout << "WARNING: T does not represent a valid rigid transformation\nProjecting onto an orthogonal basis"<< std::endl;
-        //T = rigidTrans->correctParameters(transMatrix);
-        return;
-    }
 
      //========== Convert scan points cloud ==========
 
@@ -110,6 +92,67 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
 
     //Convert ROS points cloud to libpointmatcher cloud
     DP readPoints = PointMatcher_ros::rosMsgToPointMatcherCloud<float>(cloud);
+    //if no poits in scan - return
+    if (readPoints.getNbPoints()<minPointsToMatch) return;
+
+
+    //========== Transform scan ==========
+
+    //filter density of scan, transform to pose
+    //select map points with some radius, remove them from mapPoints
+    pair<DP,DP> clouds = filter_transform_map_scan(readPoints);
+    DP readTransformedPoints = clouds.first, partialMap = clouds.second;
+
+
+    //========== Create map ==========
+
+    //Create map if empty
+    if (mapPoints.getNbPoints() == 0) {
+        mapPoints = DP(readTransformedPoints);
+        PM::Matrix weightsMap = PM::Matrix::Constant(1, mapPoints.features.cols(), calc_point_weight(initPointProbability));
+        mapPoints.addDescriptor("weights", weightsMap);
+    }
+
+    //========== Update map ==========
+
+    //If not enough points in partial map to match add all points from scan to full map
+    else if (partialMap.getNbPoints() < minPointsToMatch){
+        update_map(readTransformedPoints, partialMap);
+    }
+    else {
+        //Find matches of transformed scan and selected points of map
+        DP readOutliers = match_clouds(readTransformedPoints, partialMap);
+
+        //Update weights of map points, append scan outliers
+        update_map(readOutliers, partialMap);
+    }
+}
+
+
+
+
+
+pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
+
+    //========== Get and check pose transformation params ==========
+
+    PM::TransformationParameters robotPoseTrans;
+    try {
+        //Get transformation of new points cloud to map
+        robotPoseTrans = PointMatcher_ros::transformListenerToEigenMatrix<float>(*tfListener, mapFrame, poseFrame, ros::Time(0));
+    }
+    catch (tf2::TransformException& ex)
+    {
+        ROS_WARN("%s", ex.what());
+        return make_pair(DP(), DP());
+    }
+
+    PM::Transformation* rigidTrans = PM::get().REG(Transformation).create("RigidTransformation");
+
+    if (!rigidTrans->checkParameters(robotPoseTrans)) {
+        std::cout << "WARNING: T does not represent a valid rigid transformation"<< std::endl;
+        return make_pair(DP(), DP());
+    }
 
     //========== Filter and transform scan ==========
 
@@ -131,21 +174,11 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
     readPoints.removeDescriptor("densities");
 
     // Compute the transformation from pose to map
-    PM::DataPoints readTransformedPoints =  rigidTrans->compute(readPoints, robotPoseTrans);
+    DP readTransformedPoints =  rigidTrans->compute(readPoints, robotPoseTrans);
     //Publish to ROS
     scanCloudPublisher.publish(
         PointMatcher_ros::pointMatcherCloudToRosMsg<float>(readTransformedPoints, mapFrame, ros::Time(0)));
 
-
-    //========== Create map ==========
-
-    //Create map if empty
-    if (mapPoints.featureLabels.size() == 0) {
-        mapPoints = DP(readTransformedPoints);
-        const PM::Matrix weightsMap = PM::Matrix::Constant(1, mapPoints.features.cols(), calc_point_weight(initPointProbability));
-        mapPoints.addDescriptor("weights", weightsMap);
-        return;
-    }
 
     //========== Filter and transform map ==========
 
@@ -159,6 +192,10 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
         map_list_of("maxDist", toParam(cutOffRange))
     ));
     DP partialMap = maxDistFlter->filter(mapAtOrigin);
+
+    if (partialMap.getNbPoints() == 0)
+        return make_pair(readTransformedPoints, DP());
+
     partialMap = rigidTrans->compute(partialMap, robotPoseTrans);
 
     //Filter map by radius - get least of map
@@ -173,23 +210,19 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
     partialMapCloudPublisher.publish(
         PointMatcher_ros::pointMatcherCloudToRosMsg<float>(partialMap, mapFrame, ros::Time(0)));
 
-    //========== Main function ==========
-
-    maintain_features(readTransformedPoints, partialMap);
-
+    return make_pair(readTransformedPoints, partialMap);
 }
 
 
 
 
 
-
-void maintain_features(DP& read, DP& ref) {
+DP match_clouds(DP& read, DP& ref) {
 
     // ========== Init ==========
 
-    const int readPtsCount = read.features.cols();
-    const int refPtsCount = ref.features.cols();
+    int readPtsCount = read.getNbPoints();
+    int refPtsCount = ref.getNbPoints();
 
     // Create the default ICP algorithm
     PM::ICP icp;
@@ -219,7 +252,7 @@ void maintain_features(DP& read, DP& ref) {
 
     // For every point set maximum search distanse as square root of distanse to
     // farest point, found by matcherRead
-    const PM::Matrix maxSearchDist = readMatches.dists.colwise().maxCoeff().cwiseSqrt();
+    PM::Matrix maxSearchDist = readMatches.dists.colwise().maxCoeff().cwiseSqrt();
     read.addDescriptor("maxSearchDist", maxSearchDist);
 
     // Matcher to match points on both scans with limit to max distance
@@ -232,12 +265,12 @@ void maintain_features(DP& read, DP& ref) {
 
     // Find matches from read to ref
     PM::Matches refMatches(knnRef, refPtsCount);
-    refMatches = matcherReadToTarget->findClosests(read);
+        refMatches = matcherReadToTarget->findClosests(read);
 
     // Add new descriptors to select inliers and outliers
-    const PM::Matrix inliersRead = PM::Matrix::Zero(1, read.features.cols());
+    PM::Matrix inliersRead = PM::Matrix::Zero(1, read.getNbPoints());
     read.addDescriptor("inliers", inliersRead);
-    const PM::Matrix inliersRef = PM::Matrix::Zero(1, ref.features.cols());
+    PM::Matrix inliersRef = PM::Matrix::Zero(1, ref.getNbPoints());
     ref.addDescriptor("inliers", inliersRef);
 
     // Get view to edit inliers
@@ -294,14 +327,8 @@ void maintain_features(DP& read, DP& ref) {
 
     // ========== Update map ==========
 
-    update_map(readOutliers, ref);
-
-    // ========== Publish to ROS ==========
-
     sensor_msgs::PointCloud2 inliersCloud = PointMatcher_ros::pointMatcherCloudToRosMsg<float>(refInliers, mapFrame, ros::Time(0));
-    sensor_msgs::PointCloud2 mapCloud = PointMatcher_ros::pointMatcherCloudToRosMsg<float>(mapPoints, mapFrame, ros::Time(0));
     inliersCloudPublisher.publish(inliersCloud);
-    mapCloudPublisher.publish(mapCloud);
 
     // ========== Debug ==========
 
@@ -324,6 +351,8 @@ void maintain_features(DP& read, DP& ref) {
         readOutliers.save("read_outliers.vtk");
     }
 
+    return readOutliers;
+
 }
 
 
@@ -332,41 +361,52 @@ void maintain_features(DP& read, DP& ref) {
 
 void update_map(DP& scanOutliers, DP& partialMap) {
 
-    DP::View mapWeightsDesc = partialMap.getDescriptorViewByName("weights");
-    DP::View mapInliersDesc = partialMap.getDescriptorViewByName("inliers");
+    int mapSize = partialMap.getNbPoints();
 
-    int mapSize = partialMap.features.cols();
+    // ========== Update weights of map  ==========
 
-    // For map inliers add weight, for outliers sub weight
-    for (int i=0; i<mapSize; i++) {
-        if (mapInliersDesc(0,i) == 1.0)
-            mapWeightsDesc(0,i) += calc_point_weight(inlierPointProbability);
-        else
-            mapWeightsDesc(0,i) += calc_point_weight(outlierPointProbability);
-    }
+    //if points from map were not matched (because them not enough), do not update their weights
+    if (mapSize>=minPointsToMatch) {
 
-    //Remove points from map that weight less than threshold
-    DP newMapPoints = partialMap.createSimilarEmpty();
-    int count = 0;
-    for (int i = 0; i < mapSize; i++) {
-        if (mapWeightsDesc(0,i)>delPointThreshold) {
-            newMapPoints.features.col(count) = partialMap.features.col(i);
-            newMapPoints.descriptors.col(count) = partialMap.descriptors.col(i);
-            count++;
+        DP::View mapWeightsDesc = partialMap.getDescriptorViewByName("weights");
+        DP::View mapInliersDesc = partialMap.getDescriptorViewByName("inliers");
+
+        // For map inliers add weight, for outliers sub weight
+        for (int i=0; i<mapSize; i++) {
+            if (mapInliersDesc(0,i) == 1.0)
+                mapWeightsDesc(0,i) += calc_point_weight(inlierPointProbability);
+            else
+                mapWeightsDesc(0,i) += calc_point_weight(outlierPointProbability);
         }
+
+        //Remove points from map that weight less than threshold
+        DP newMapPoints = partialMap.createSimilarEmpty();
+        int count = 0;
+        for (int i = 0; i < mapSize; i++) {
+            if (mapWeightsDesc(0,i)>delPointThreshold) {
+                newMapPoints.features.col(count) = partialMap.features.col(i);
+                newMapPoints.descriptors.col(count) = partialMap.descriptors.col(i);
+                count++;
+            }
+        }
+        newMapPoints.conservativeResize(count);
+
+        //Add partial map to least of map
+        newMapPoints.removeDescriptor("inliers");
+        mapPoints.concatenate(newMapPoints);
     }
-    newMapPoints.conservativeResize(count);
 
-    //Add scan outliers to map
-    const PM::Matrix weightsScanOutliers = PM::Matrix::Constant(1, scanOutliers.features.cols(), calc_point_weight(initPointProbability));
+    // ========== Add scan outliers to map  ==========
+
+    PM::Matrix weightsScanOutliers = PM::Matrix::Constant(1, scanOutliers.getNbPoints(), calc_point_weight(initPointProbability));
     scanOutliers.addDescriptor("weights", weightsScanOutliers);
-    newMapPoints.concatenate(scanOutliers);
+    scanOutliers.removeDescriptor("inliers");
+    mapPoints.concatenate(scanOutliers);
 
-    // Clear useless descriptor
-    newMapPoints.removeDescriptor("inliers");
+    // ========== Publish to ROS ==========
 
-    //Add partial map to least of map
-    mapPoints.concatenate(newMapPoints);
+    sensor_msgs::PointCloud2 mapCloud = PointMatcher_ros::pointMatcherCloudToRosMsg<float>(mapPoints, mapFrame, ros::Time(0));
+    mapCloudPublisher.publish(mapCloud);
 
 
 }
