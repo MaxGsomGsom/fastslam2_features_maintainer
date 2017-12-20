@@ -33,8 +33,8 @@ double delPointThreshold = 0;
 double inlierPointProbability = 0.99; //0.8
 double outlierPointProbability = 0.1; //0.1
 bool saveToVTK = false;
-int knnRead = 10; //kd-tree //10
-int knnRef = 5; //1
+int knnRead = 20; //kd-tree //10
+int knnRef = 1; //1
 double maxScanDensity = 100000; //points per m3
 int minPointsToMatch = max(knnRef, knnRead);
 
@@ -50,9 +50,42 @@ double calc_point_weight(double probability, double prev=0) {
     return prev + log(probability / (1.0 - probability));
 }
 
+// ===== Create filters and transformations =====
 
+PM::DataPointsFilter* normalsFlter(PM::get().DataPointsFilterRegistrar.create(
+    "SurfaceNormalDataPointsFilter",
+    map_list_of("keepNormals", toParam(0))
+               ("keepDensities", toParam(1))
+));
 
+PM::Transformation* rigidTrans = PM::get().REG(Transformation).create("RigidTransformation");
 
+PM::DataPointsFilter* densityFlter(PM::get().DataPointsFilterRegistrar.create(
+    "MaxDensityDataPointsFilter",
+    map_list_of("maxDensity", toParam(maxScanDensity))
+));
+
+PM::DataPointsFilter* maxDistFlter(PM::get().DataPointsFilterRegistrar.create(
+    "MaxDistDataPointsFilter",
+    map_list_of("maxDist", toParam(cutOffRange))
+));
+
+PM::DataPointsFilter* minDistFlter(PM::get().DataPointsFilterRegistrar.create(
+    "MinDistDataPointsFilter",
+    map_list_of("minDist", toParam(cutOffRange))
+));
+
+PM::Matcher *matcherRead(PM::get().MatcherRegistrar.create(
+    "KDTreeMatcher",
+    map_list_of("knn", toParam(knnRead))));
+
+PM::Matcher *matcherReadToTarget(PM::get().MatcherRegistrar.create(
+    "KDTreeVarDistMatcher",
+    map_list_of("knn", toParam(knnRef))
+               ("maxDistField","maxSearchDist") // descriptor name
+    ));
+
+// ==========
 
 int main(int argc, char** argv)
 {
@@ -147,8 +180,6 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
         return make_pair(DP(), DP());
     }
 
-    PM::Transformation* rigidTrans = PM::get().REG(Transformation).create("RigidTransformation");
-
     if (!rigidTrans->checkParameters(robotPoseTrans)) {
         std::cout << "WARNING: T does not represent a valid rigid transformation"<< std::endl;
         return make_pair(DP(), DP());
@@ -157,18 +188,9 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
     //========== Filter and transform scan ==========
 
     //Calc densities descriptor
-    PM::DataPointsFilter* normalsFlter(PM::get().DataPointsFilterRegistrar.create(
-        "SurfaceNormalDataPointsFilter",
-        map_list_of("keepNormals", toParam(0))
-                   ("keepDensities", toParam(1))
-    ));
     readPoints = normalsFlter->filter(readPoints);
 
     //Filter scan by density
-    PM::DataPointsFilter* densityFlter(PM::get().DataPointsFilterRegistrar.create(
-        "MaxDensityDataPointsFilter",
-        map_list_of("maxDensity", toParam(maxScanDensity))
-    ));
     readPoints = densityFlter->filter(readPoints);
 
     readPoints.removeDescriptor("densities");
@@ -187,10 +209,6 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
     DP mapAtOrigin = rigidTrans->compute(mapPoints, robotPoseTransInv);
 
     //Filter map by radius - get only closest points
-    PM::DataPointsFilter* maxDistFlter(PM::get().DataPointsFilterRegistrar.create(
-        "MaxDistDataPointsFilter",
-        map_list_of("maxDist", toParam(cutOffRange))
-    ));
     DP partialMap = maxDistFlter->filter(mapAtOrigin);
 
     if (partialMap.getNbPoints() == 0)
@@ -199,10 +217,6 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
     partialMap = rigidTrans->compute(partialMap, robotPoseTrans);
 
     //Filter map by radius - get least of map
-    PM::DataPointsFilter* minDistFlter(PM::get().DataPointsFilterRegistrar.create(
-        "MinDistDataPointsFilter",
-        map_list_of("minDist", toParam(cutOffRange))
-    ));
     mapPoints = minDistFlter->filter(mapAtOrigin);
     mapPoints = rigidTrans->compute(mapPoints, robotPoseTrans);
 
@@ -241,9 +255,6 @@ DP match_clouds(DP& read, DP& ref) {
 
 
     // Matcher to find closest points on read scan
-    PM::Matcher *matcherRead(PM::get().MatcherRegistrar.create(
-        "KDTreeMatcher",
-        map_list_of("knn", toParam(knnRead))));
     matcherRead->init(read);
 
     // Find clothest points on read
@@ -256,11 +267,6 @@ DP match_clouds(DP& read, DP& ref) {
     read.addDescriptor("maxSearchDist", maxSearchDist);
 
     // Matcher to match points on both scans with limit to max distance
-    PM::Matcher *matcherReadToTarget(PM::get().MatcherRegistrar.create(
-        "KDTreeVarDistMatcher",
-        map_list_of("knn", toParam(knnRef))
-                   ("maxDistField","maxSearchDist") // descriptor name
-        ));
     matcherReadToTarget->init(ref);
 
     // Find matches from read to ref
