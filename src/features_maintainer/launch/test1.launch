@@ -1,8 +1,8 @@
 <launch>
 
     <arg name="model" default="waffle" doc="model type [burger, waffle]" />
-    <arg name="x_pos" default="0" />
-    <arg name="y_pos" default="0" />
+    <arg name="x_pos" default="-8" />
+    <arg name="y_pos" default="-8" />
 
     <param name="robot_description" command="$(find xacro)/xacro.py $(find turtlebot3_description)/urdf/turtlebot3_$(arg model).urdf.xacro" />
 
@@ -66,7 +66,7 @@
         <remap from="map" to="/map" />
     </node>
 
-    <!--<node name="features_maintainer" pkg="features_maintainer" type="features_maintainer_node"/>-->
+    <!--<node name="features_maintainer" pkg="features_maintainer" type="features_maintainer_node" />-->
 
     <!--<node pkg="turtlebot3_teleop" type="turtlebot3_teleop_key" name="turtlebot3_teleop_keyboard"  output="log"/>-->
 

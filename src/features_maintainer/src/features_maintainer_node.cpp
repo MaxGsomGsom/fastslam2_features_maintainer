@@ -56,6 +56,9 @@ int knnRef = 1; //1
 double maxScanDensity = 100000; //points per m3
 int minPointsToMatch = max(knnRef, knnRead);
 
+double icpDxDyDeviation = 0.2;
+double icpYawDeviation = 0.2;
+
 DP mapPoints; //map
 
 // ===== Functions =====
@@ -170,11 +173,22 @@ void odom_callback(const nav_msgs::Odometry& msg)
 }
 
 void adjust_pose(TP& scanToMapTransform) {
-    //double dx = scanToMapTransform(0, 3);
-    //double dy = scanToMapTransform(0, 1);
-    //double dth = -atan2(scanToMapTransform(0,2), scanToMapTransform(1,2));
-    //cout << dx << " " << dy << " " << dth << endl;
-    //cout << scanToMapTransform << endl << endl;
+
+    //Calc corrections from matrix
+    double dx = scanToMapTransform(0, 3);
+    double dy = scanToMapTransform(1, 3);
+
+    double pitch = -asin(scanToMapTransform(0,2));
+    double roll = atan2(scanToMapTransform(2,1), scanToMapTransform(2,2));
+    double yaw = atan2(scanToMapTransform(1,0) / cos(pitch), scanToMapTransform(0,0) / cos(pitch));
+
+    //Apply corrections if they in bounds
+    if (abs(dx) > icpDxDyDeviation || abs(dy) > icpDxDyDeviation || abs(yaw) > icpYawDeviation)
+        return;
+
+    rx+=dx;
+    ry+=dy;
+    rth+=yaw;
 }
 
 #endif
@@ -189,7 +203,7 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
     laser_geometry::LaserProjection projector;
     projector.projectLaser(msg, cloud, cutOffRange);
 
-    //Convert ROS points cloud to libpointmatcher cloud
+    //Convert ROS points cloud to libpoTP scanToMapTransformintmatcher cloud
     DP readPoints = PointMatcher_ros::rosMsgToPointMatcherCloud<float>(cloud);
     //if no poits in scan - return
     if (readPoints.getNbPoints()<minPointsToMatch) return;
@@ -226,8 +240,10 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
         update_map(readOutliers, partialMap);
 
 #ifdef slam
+#ifdef icp_test
         //Correct pose with transform params from scan to map
         adjust_pose(scanToMapTransform);
+#endif
 #endif
     }
 }
@@ -321,12 +337,14 @@ pair<DP,TP> match_clouds(DP& read, DP& ref) {
     int readPtsCount = read.getNbPoints();
     int refPtsCount = ref.getNbPoints();
 
+    TP scanToMapTransform;
+
 #ifdef icp_test
     // ========== Match points with ICP ==========
     // Don't work correct, only for debug. Below using not transformed cloud
 
     // Compute the transformation to express readPoints in mapPoints
-    TP scanToMapTransform = icp(read, ref);
+    scanToMapTransform = icp(read, ref);
 
     // Transform readPoints to express it in mapPoints
     DP readPointsTransformed(read);
