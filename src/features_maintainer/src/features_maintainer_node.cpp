@@ -7,10 +7,11 @@
 #include <pointmatcher_ros/transform.h>
 #include <tf/transform_listener.h>
 #include <nav_msgs/Odometry.h>
-#include <Eigen/Geometry>
+#include <fstream>
 
 
-#define slam //use own pose estimation insted of pose from tf
+//#define slam //use own pose estimation insted of pose from tf
+//#define icp_test  //debug icp
 
 using namespace PointMatcherSupport;
 using namespace std;
@@ -25,8 +26,11 @@ ros::Publisher inliersCloudPublisher;
 ros::Publisher mapCloudPublisher;
 ros::Publisher partialMapCloudPublisher;
 
+#ifdef icp_test
+ros::Publisher icpScanPublisher;
+#endif
 #ifdef slam
-double rx=6, ry=-6, rth=0; //robot pose
+double rx=0, ry=0, rth=0; //robot pose
 ros::Time lastTime;
 
 void odom_callback(const nav_msgs::Odometry& msg);
@@ -36,7 +40,8 @@ void adjust_pose(TP& scanToMapTransform);
 tf::TransformListener* tfListener;
 #endif
 
-//Params
+// ===== Params =====
+
 double cutOffRange = 3.9;
 double rateHZ = 5;
 string mapFrame = "map";
@@ -46,14 +51,15 @@ double delPointThreshold = 0;
 double inlierPointProbability = 0.99; //0.8
 double outlierPointProbability = 0.1; //0.1
 bool saveToVTK = false;
-int knnRead = 20; //kd-tree //10
+int knnRead = 10; //kd-tree //10
 int knnRef = 1; //1
 double maxScanDensity = 100000; //points per m3
 int minPointsToMatch = max(knnRef, knnRead);
 
 DP mapPoints; //map
 
-//Functions
+// ===== Functions =====
+
 void scan_callback(const sensor_msgs::LaserScan& msg);
 pair<DP,DP> filter_transform_map_scan(DP& readPoints); //return: transformed scan and partial map
 pair<DP,TP> match_clouds(DP& read, DP& ref); //return: scan outliers and scan to map transform
@@ -98,16 +104,22 @@ PM::Matcher *matcherReadToTarget(PM::get().MatcherRegistrar.create(
                ("maxDistField","maxSearchDist") // descriptor name
     ));
 
-// Create the default ICP algorithm
+#ifdef icp_test
 PM::ICP icp;
+#endif
 
-// ==========
+// ===== Main =====
 
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "features_maintainer_node");
 
-    icp.setDefault();
+#ifdef icp_test
+    // Load ICP conf from file
+    ifstream conf;
+    conf.open("conf.yaml");
+    icp.loadFromYaml(conf);
+#endif
 
     //Create node and topics
     ros::NodeHandle node("~");
@@ -118,6 +130,9 @@ int main(int argc, char** argv)
     partialMapCloudPublisher = node.advertise<sensor_msgs::PointCloud2>("/partial_map_cloud", 10);
     ros::Subscriber scanSubscriber = node.subscribe("/scan", 1, scan_callback);
 
+#ifdef icp_test
+    icpScanPublisher = node.advertise<sensor_msgs::PointCloud2>("/icp_scan_cloud", 10);
+#endif
 #ifdef slam
     lastTime = ros::Time::now();
     ros::Subscriber odomSubscriber = node.subscribe("/odom", 1, odom_callback);
@@ -159,7 +174,7 @@ void adjust_pose(TP& scanToMapTransform) {
     //double dy = scanToMapTransform(0, 1);
     //double dth = -atan2(scanToMapTransform(0,2), scanToMapTransform(1,2));
     //cout << dx << " " << dy << " " << dth << endl;
-    cout << scanToMapTransform << endl << endl; //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    //cout << scanToMapTransform << endl << endl;
 }
 
 #endif
@@ -179,14 +194,12 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
     //if no poits in scan - return
     if (readPoints.getNbPoints()<minPointsToMatch) return;
 
-
     //========== Transform scan ==========
 
     //filter density of scan, transform to pose
     //select map points with some radius, remove them from mapPoints
     pair<DP,DP> clouds = filter_transform_map_scan(readPoints);
     DP readTransformedPoints = clouds.first, partialMap = clouds.second;
-
 
     //========== Create map ==========
 
@@ -216,7 +229,6 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
         //Correct pose with transform params from scan to map
         adjust_pose(scanToMapTransform);
 #endif
-
     }
 }
 
@@ -270,7 +282,7 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
 
     // Compute the transformation from pose to map
     DP readTransformedPoints =  rigidTrans->compute(readPoints, robotPoseTrans);
-    //Publish to ROS
+    //Publish to ROS raw scan
     scanCloudPublisher.publish(
         PointMatcher_ros::pointMatcherCloudToRosMsg<float>(readTransformedPoints, mapFrame, ros::Time(0)));
 
@@ -309,7 +321,9 @@ pair<DP,TP> match_clouds(DP& read, DP& ref) {
     int readPtsCount = read.getNbPoints();
     int refPtsCount = ref.getNbPoints();
 
+#ifdef icp_test
     // ========== Match points with ICP ==========
+    // Don't work correct, only for debug. Below using not transformed cloud
 
     // Compute the transformation to express readPoints in mapPoints
     TP scanToMapTransform = icp(read, ref);
@@ -318,8 +332,12 @@ pair<DP,TP> match_clouds(DP& read, DP& ref) {
     DP readPointsTransformed(read);
     icp.transformations.apply(readPointsTransformed, scanToMapTransform);
 
-    // ========== Find matches ==========
+    //Publish to ROS icp transformed scan
+    icpScanPublisher.publish(
+        PointMatcher_ros::pointMatcherCloudToRosMsg<float>(readPointsTransformed, mapFrame, ros::Time(0)));
+#endif
 
+    // ========== Find matches ==========
 
     // Matcher to find closest points on read scan
     matcherRead->init(read);
@@ -413,7 +431,7 @@ pair<DP,TP> match_clouds(DP& read, DP& ref) {
           "ref:  all=" << ref.getNbPoints() <<
           ", in=" << refInliersCount <<
           ", out=" << refOutliersCount << endl <<
-          "map:  all=" << mapPoints.getNbPoints();
+          "map_least:  all=" << mapPoints.getNbPoints();
     ROS_INFO("%s", ss.str().c_str());
 
     if (saveToVTK) {

@@ -15,6 +15,8 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(libpointmatcher 1.2.3 REQUIRED)
 include_directories(${libpointmatcher_INCLUDE_DIRS})
 
+configure_file(param/conf.yaml ${CATKIN_DEVEL_PREFIX}/${CATKIN_PACKAGE_BIN_DESTINATION}/lib/features_maintainer/conf.yaml COPYONLY)
+
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 
