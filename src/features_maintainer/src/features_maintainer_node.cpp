@@ -6,13 +6,18 @@
 #include <pointmatcher/PointMatcher.h>
 #include <pointmatcher_ros/transform.h>
 #include <tf/transform_listener.h>
+#include <nav_msgs/Odometry.h>
+#include <Eigen/Geometry>
 
+
+#define slam //use own pose estimation insted of pose from tf
 
 using namespace PointMatcherSupport;
 using namespace std;
 
 typedef PointMatcher<float> PM;
 typedef PM::DataPoints DP;
+typedef PM::TransformationParameters TP;
 
 //Publishers
 ros::Publisher scanCloudPublisher;
@@ -20,8 +25,16 @@ ros::Publisher inliersCloudPublisher;
 ros::Publisher mapCloudPublisher;
 ros::Publisher partialMapCloudPublisher;
 
+#ifdef slam
+double rx=6, ry=-6, rth=0; //robot pose
+ros::Time lastTime;
+
+void odom_callback(const nav_msgs::Odometry& msg);
+void adjust_pose(TP& scanToMapTransform);
+#else
 //Listener for pose to map transformation
 tf::TransformListener* tfListener;
+#endif
 
 //Params
 double cutOffRange = 3.9;
@@ -38,12 +51,12 @@ int knnRef = 1; //1
 double maxScanDensity = 100000; //points per m3
 int minPointsToMatch = max(knnRef, knnRead);
 
-DP mapPoints;
+DP mapPoints; //map
 
 //Functions
 void scan_callback(const sensor_msgs::LaserScan& msg);
 pair<DP,DP> filter_transform_map_scan(DP& readPoints); //return: transformed scan and partial map
-DP match_clouds(DP& read, DP& ref); //return: scan outliers
+pair<DP,TP> match_clouds(DP& read, DP& ref); //return: scan outliers and scan to map transform
 void update_map(DP& scanOutliers, DP& partialMap);
 
 double calc_point_weight(double probability, double prev=0) {
@@ -85,20 +98,32 @@ PM::Matcher *matcherReadToTarget(PM::get().MatcherRegistrar.create(
                ("maxDistField","maxSearchDist") // descriptor name
     ));
 
+// Create the default ICP algorithm
+PM::ICP icp;
+
 // ==========
 
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "features_maintainer_node");
 
+    icp.setDefault();
+
     //Create node and topics
     ros::NodeHandle node("~");
-    tfListener = new tf::TransformListener();
+
     scanCloudPublisher = node.advertise<sensor_msgs::PointCloud2>("/scan_cloud", 10);
     inliersCloudPublisher = node.advertise<sensor_msgs::PointCloud2>("/matched_cloud", 10);
     mapCloudPublisher = node.advertise<sensor_msgs::PointCloud2>("/map_cloud", 10);
     partialMapCloudPublisher = node.advertise<sensor_msgs::PointCloud2>("/partial_map_cloud", 10);
     ros::Subscriber scanSubscriber = node.subscribe("/scan", 1, scan_callback);
+
+#ifdef slam
+    lastTime = ros::Time::now();
+    ros::Subscriber odomSubscriber = node.subscribe("/odom", 1, odom_callback);
+#else
+    tfListener = new tf::TransformListener();
+#endif
 
     ros::Rate rate(rateHZ);
     while (ros::ok()) {        
@@ -109,9 +134,35 @@ int main(int argc, char** argv)
     return 0;
 };
 
+#ifdef slam
+void odom_callback(const nav_msgs::Odometry& msg)
+{
+    ros::Time currentTime = msg.header.stamp;
+    double vx = msg.twist.twist.linear.x;
+    double vy = msg.twist.twist.linear.y;
+    double vth = msg.twist.twist.angular.z;
 
+    double dt = (currentTime - lastTime).toSec();
+    double delta_x = (vx * cos(rth) - vy * sin(rth)) * dt;
+    double delta_y = (vx * sin(rth) + vy * cos(rth)) * dt;
+    double delta_th = vth * dt;
 
+    rx += delta_x;
+    ry += delta_y;
+    rth += delta_th;
 
+    lastTime = currentTime;
+}
+
+void adjust_pose(TP& scanToMapTransform) {
+    //double dx = scanToMapTransform(0, 3);
+    //double dy = scanToMapTransform(0, 1);
+    //double dth = -atan2(scanToMapTransform(0,2), scanToMapTransform(1,2));
+    //cout << dx << " " << dy << " " << dth << endl;
+    cout << scanToMapTransform << endl << endl; //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+}
+
+#endif
 
 void scan_callback(const sensor_msgs::LaserScan& msg)
 {
@@ -154,10 +205,18 @@ void scan_callback(const sensor_msgs::LaserScan& msg)
     }
     else {
         //Find matches of transformed scan and selected points of map
-        DP readOutliers = match_clouds(readTransformedPoints, partialMap);
+        pair<DP,TP> outliersAndParams = match_clouds(readTransformedPoints, partialMap);
+        DP readOutliers = outliersAndParams.first;
+        TP scanToMapTransform = outliersAndParams.second;
 
         //Update weights of map points, append scan outliers
         update_map(readOutliers, partialMap);
+
+#ifdef slam
+        //Correct pose with transform params from scan to map
+        adjust_pose(scanToMapTransform);
+#endif
+
     }
 }
 
@@ -169,7 +228,20 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
 
     //========== Get and check pose transformation params ==========
 
-    PM::TransformationParameters robotPoseTrans;
+    TP robotPoseTrans;
+
+#ifdef slam
+    nav_msgs::Odometry rosOdom;
+    rosOdom.pose.pose.position.x = rx;
+    rosOdom.pose.pose.position.y = ry;
+
+    tf::Quaternion quatTF = tf::createQuaternionFromYaw(rth);
+    geometry_msgs::Quaternion quatROS;
+    tf::quaternionTFToMsg(quatTF, quatROS);
+    rosOdom.pose.pose.orientation = quatROS;
+
+    robotPoseTrans = PointMatcher_ros::odomMsgToEigenMatrix<float>(rosOdom);
+#else
     try {
         //Get transformation of new points cloud to map
         robotPoseTrans = PointMatcher_ros::transformListenerToEigenMatrix<float>(*tfListener, mapFrame, poseFrame, ros::Time(0));
@@ -184,6 +256,7 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
         std::cout << "WARNING: T does not represent a valid rigid transformation"<< std::endl;
         return make_pair(DP(), DP());
     }
+#endif
 
     //========== Filter and transform scan ==========
 
@@ -205,7 +278,7 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
     //========== Filter and transform map ==========
 
     //Transform map to origin
-    PM::TransformationParameters robotPoseTransInv = robotPoseTrans.inverse();
+    TP robotPoseTransInv = robotPoseTrans.inverse();
     DP mapAtOrigin = rigidTrans->compute(mapPoints, robotPoseTransInv);
 
     //Filter map by radius - get only closest points
@@ -231,25 +304,19 @@ pair<DP,DP> filter_transform_map_scan(DP& readPoints) {
 
 
 
-DP match_clouds(DP& read, DP& ref) {
-
-    // ========== Init ==========
+pair<DP,TP> match_clouds(DP& read, DP& ref) {
 
     int readPtsCount = read.getNbPoints();
     int refPtsCount = ref.getNbPoints();
 
-    // Create the default ICP algorithm
-    PM::ICP icp;
-    icp.setDefault();
-
     // ========== Match points with ICP ==========
 
     // Compute the transformation to express readPoints in mapPoints
-    PM::TransformationParameters T = icp(read, ref);
+    TP scanToMapTransform = icp(read, ref);
 
     // Transform readPoints to express it in mapPoints
     DP readPointsTransformed(read);
-    icp.transformations.apply(readPointsTransformed, T);
+    icp.transformations.apply(readPointsTransformed, scanToMapTransform);
 
     // ========== Find matches ==========
 
@@ -357,7 +424,7 @@ DP match_clouds(DP& read, DP& ref) {
         readOutliers.save("read_outliers.vtk");
     }
 
-    return readOutliers;
+    return make_pair(readOutliers, scanToMapTransform);
 
 }
 
